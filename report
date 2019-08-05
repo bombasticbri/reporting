@@ -1,0 +1,183 @@
+import json
+import requests
+import urllib3
+import math
+import pprint
+import datetime
+import itertools
+import time
+import pymssql
+
+now = datetime.datetime.now()
+
+now_format = now.strftime('%Y-%m-%dT%H:%M:%S') + now.strftime('.%f')[:4] + 'Z'
+
+#  _____________________________________ Jira GET API __________________________________________________________________
+
+url = 'https://xxxxxxxxxx.atlassian.net/rest/api/2/search'
+
+headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Basic ',
+    'Postman-Token': ""
+}
+
+parameters = {
+    'jql': 'project IN () AND issueType=incident AND statusCategory!=Done',
+    'maxResults': 50,
+    'startAt': 0,
+}
+
+response = requests.get(url=url, headers=headers, params=parameters)
+
+response_total = json.loads(response.content)
+
+total = response_total["total"]
+max = response_total["maxResults"]
+loops = math.ceil(total/max)
+
+jira_list = []
+
+fd = open('jira_response_data.json', 'w+')
+
+for x in range(0, loops):
+    response = requests.get(url=url, headers=headers, params=parameters)
+    jira_data = response.json()
+    jira_data_clean = jira_data['issues']
+    jira_list.append(jira_data_clean)
+    parameters['startAt'] = parameters['startAt'] + 50
+
+fd.write(json.dumps(jira_list, indent=2))
+fd.close()
+
+
+joined_lists = list(itertools.chain.from_iterable(jira_list))
+len_list = len(joined_lists)
+
+
+fd = open('jira_response_merged.json', 'w+')
+fd.write(json.dumps(joined_lists, indent=2))
+fd.close()
+
+keys = [li['key'] for li in joined_lists]
+status = [li['fields']['status']['name'] for li in joined_lists]
+priority = [li['fields']['priority']['name'] for li in joined_lists]
+issueType = [li['fields']['issuetype']['name'] for li in joined_lists]
+created = [li['fields']['created'] for li in joined_lists]
+project = [li['fields']['project']['name'] for li in joined_lists]
+statusCategory = [li['fields']['status']['statusCategory']['name'] for li in joined_lists]
+
+
+
+#  __________________________________ Token from Microsoft _____________________________________________________________
+
+url = "https://login.microsoftonline.com/common/oauth2/token"
+
+payload = "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"grant_type\"\r\n\r\npassword\r\n------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"scope\"\r\n\r\nopenid\r\n------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"resource\"\r\n\r\nhttps://analysis.windows.net/powerbi/api\r\n------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"client_id\"\r\n\r\nxxxxxxxxxx-xxxx-xxxx-xxxx-xxxxxxx\r\n------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"username\"\r\n\r\nemail@email.com\r\n------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\n*********\r\n------WebKitFormBoundary--"
+headers = {
+    'content-type': "multipart/form-data; boundary=----WebKitFormBoundary",
+    'cache-control': "no-cache",
+    'Postman-Token': ""
+    }
+
+response = requests.request("POST", url, data=payload, headers=headers)
+
+microsoft_auth = json.loads(response.text)
+
+microsoft_token = microsoft_auth['access_token']
+
+
+#  ______________________________________ PowerBI POST _____________________________________________________________
+
+url = "https://api.powerbi.com/v1.0/myorg/groups/xxxxxxxx-xxxx-xxxx-xxx-xxxxxxxxxxx/datasets/xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxx/tables/RealTimeData/rows"
+
+payload = ""
+headers = {
+    'Content-Type': "application/x-www-form-urlencoded",
+    'Authorization': "Bearer " + microsoft_token,
+    'cache-control': "no-cache",
+    'Postman-Token': "0"
+    }
+
+response = requests.request("DELETE", url, data=payload, headers=headers)
+
+
+# _______________________________________Delete previous data (PowerBI)_____________________________________________________
+
+url = "https://api.powerbi.com/beta/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxx/datasets/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxx/rows?key="
+
+querystring = {
+   "key": ""
+}
+
+headers = {
+    'Content-Type': "application/json",
+    'Authorization': "Bearer " + microsoft_token,
+    'cache-control': "no-cache",
+    'Postman-Token': ""
+    }
+
+# ________________________________________POST to PowerBI Live__________________________________________________________
+
+payload = [{}]
+
+for x in range(0, len_list):
+    payload[0]["issueKey"] = keys[x]
+    payload[0]["status"] = status[x]
+    payload[0]["priority"] = priority[x]
+    payload[0]["issueType"] = issueType[x]
+    payload[0]["created"] = created[x]
+    payload[0]["project"] = project[x]
+    payload[0]["statusCategory"] = statusCategory[x]
+    payload[0]["currentTime"] = now_format
+    response = requests.request("POST", url, json=payload, headers=headers)
+    time.sleep(10)
+    print(keys[x])
+
+# ________________________________________ SQL POST API ________________________________________________________________
+
+created_sql = []
+
+for i in range(0, len(created)):
+    created_format = datetime.datetime.strptime(created[i], '%Y-%m-%dT%H:%M:%S.%f%z')
+    created_sql.append(created_format.strftime('%Y-%m-%dT%H:%M:%S'))
+
+
+now_sql = []
+
+now_format = datetime.datetime.strptime(now_format, '%Y-%m-%dT%H:%M:%S.%f%z')
+
+now_sql.append(now_format.strftime('%Y-%m-%dT%H:%M:%S'))
+
+conn = pymssql.connect(server='', user='',
+                       password='', database='', autocommit=True)
+
+cursor = conn.cursor()
+
+for x in range(0, len_list):
+    cursor.execute("INSERT INTO OpenIncidentsSQL VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (keys[x], project[x], status[x], statusCategory[x], priority[x], issueType[x], created_sql[x], now_sql))
+
+
+
+
+# ________________________________________ DELETE test data (PBI) ______________________________________________________
+
+# url = "https://api.powerbi.com/v1.0/myorg/groups/xxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxx/datasets/xxxxxxx-xxxx-xxxx-xxxxx-xxxxxxxxxx/tables/RealTimeData/rows"
+#
+# payload = ""
+# headers = {
+#     'Content-Type': "application/x-www-form-urlencoded",
+#     'Authorization': "Bearer " + microsoft_token,
+#     'cache-control': "no-cache",
+#     'Postman-Token': ""
+#     }
+#
+# response = requests.request("DELETE", url, data=payload, headers=headers)
+#
+# print(response.text)
+
+
+# ______________________________________________________________________________________________________________________
+
+
+
